@@ -86,14 +86,16 @@ def _schedule_step(
     )
 
     # Simulate what the callback would produce (without actual PyTorch tensors).
-    records = _simulate_moe_forward(collector, trace_context)
+    records = _simulate_moe_forward(
+        collector, trace_context, num_layers=len(collector._layer_names)
+    )
     return records
 
 
 def _simulate_moe_forward(
     collector: ExpertTraceCollector,
     trace_context: TraceContext,
-    num_layers: int = 28,
+    num_layers: int,
     top_k: int = 2,
     rng: np.random.RandomState | None = None,
 ) -> list[dict]:
