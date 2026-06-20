@@ -170,30 +170,44 @@ def test_chunked_prefill() -> None:
         )
         all_records.extend(records)
 
-    # Verify per-chunk token_indices.
-    expected_indices = list(range(10)) * 2  # 10 tokens × 2 layers
-    actual_indices = [r["token_idx"] for r in all_records]
-    assert actual_indices == expected_indices, (
-        f"Expected {expected_indices}, got {actual_indices}"
+    # Verify count: 10 tokens × 2 layers = 20 records.
+    assert len(all_records) == 20, f"Expected 20 records, got {len(all_records)}"
+
+    # The JSONL output is layer-major within each step:
+    #   step 1: layer 0 [t0,t1,t2,t3], layer 1 [t0,t1,t2,t3]
+    #   step 2: layer 0 [t4,t5,t6,t7], layer 1 [t4,t5,t6,t7]
+    #   step 3: layer 0 [t8,t9],       layer 1 [t8,t9]
+    #
+    # Verify using (token_idx, layer_idx) set — order-insensitive.
+    expected_pairs: set[tuple[int, int]] = set()
+    for tok in range(10):
+        for layer in range(2):
+            expected_pairs.add((tok, layer))
+    actual_pairs = {(r["token_idx"], r["layer_idx"]) for r in all_records}
+    assert actual_pairs == expected_pairs, (
+        f"Missing: {expected_pairs - actual_pairs}, "
+        f"Extra: {actual_pairs - expected_pairs}"
     )
 
     # Verify phase is always prefill.
     phases = {r["phase"] for r in all_records}
     assert phases == {"prefill"}, f"Expected only 'prefill', got {phases}"
 
-    # Verify token_ids match.
-    expected_tids = prompt_ids * 2
-    actual_tids = [r["token_id"] for r in all_records]
-    assert actual_tids == expected_tids, (
-        f"Expected {expected_tids}, got {actual_tids}"
-    )
+    # Verify token_ids match per (token_idx, layer).
+    for r in all_records:
+        assert r["token_id"] == prompt_ids[r["token_idx"]], (
+            f"token_idx={r['token_idx']}: expected token_id "
+            f"{prompt_ids[r['token_idx']]}, got {r['token_id']}"
+        )
 
     # Verify decode_token_indices are all -1.
     for r in all_records:
         assert r["decode_token_idx"] == -1, r
 
-    print(f"  ✓ {len(all_records)} records, all prefill, correct token_indices")
-    print(f"  ✓ Chunks: 0-3, 4-7, 8-9 → contiguous positions 0..9")
+    print(f"  ✓ {len(all_records)} records (10 tokens × 2 layers)")
+    print(f"  ✓ All (token_idx, layer_idx) pairs present")
+    print(f"  ✓ All phases=prefill, decode_token_idx=-1")
+    print(f"  ✓ Chunks: 0-3, 4-7, 8-9 → correct positions")
     print()
 
 
@@ -303,22 +317,31 @@ def test_mixed_prefill_decode() -> None:
     )
 
     # r0: prefill, tokens 0..4, decode_token_idx=-1, req_idx=0
+    # Layer-major ordering: each layer sees all r0 tokens together.
     r0_recs = [r for r in records if r["request_id"] == "r0"]
     assert all(r["phase"] == "prefill" for r in r0_recs), r0_recs
-    assert [r["token_idx"] for r in r0_recs] == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    r0_pairs = {(r["token_idx"], r["layer_idx"]) for r in r0_recs}
+    assert r0_pairs == {(t, l) for t in range(5) for l in range(2)}, (
+        f"r0 missing pairs: {(t, l) for t in range(5) for l in range(2)} - r0_pairs"
+    )
     assert all(r["decode_token_idx"] == -1 for r in r0_recs)
 
     # r1: decode, token at position 25 (20 prompt + 5 decoded), req_idx=1
     r1_recs = [r for r in records if r["request_id"] == "r1"]
     assert all(r["phase"] == "decode" for r in r1_recs)
-    assert r1_recs[0]["token_idx"] == 25
-    assert r1_recs[0]["decode_token_idx"] == 5  # 25 - 20
-    assert r1_recs[0]["token_id"] == 225
+    r1_pairs = {(r["token_idx"], r["layer_idx"]) for r in r1_recs}
+    assert r1_pairs == {(25, 0), (25, 1)}, f"r1 pairs: {r1_pairs}"
+    r1_l0 = next(r for r in r1_recs if r["layer_idx"] == 0)
+    assert r1_l0["decode_token_idx"] == 5  # 25 - 20
+    assert r1_l0["token_id"] == 225
 
     # r2: prefill (still has 5 tokens to go), req_idx=2
     r2_recs = [r for r in records if r["request_id"] == "r2"]
     assert all(r["phase"] == "prefill" for r in r2_recs), r2_recs
-    assert [r["token_idx"] for r in r2_recs] == [5, 5, 6, 6, 7, 7, 8, 8, 9, 9]
+    r2_pairs = {(r["token_idx"], r["layer_idx"]) for r in r2_recs}
+    assert r2_pairs == {(t, l) for t in range(5, 10) for l in range(2)}, (
+        f"r2 missing: {(t, l) for t in range(5, 10) for l in range(2)} - {r2_pairs}"
+    )
     assert all(r["decode_token_idx"] == -1 for r in r2_recs)
 
     # Verify req_indices ordering is correct.
@@ -335,9 +358,9 @@ def test_mixed_prefill_decode() -> None:
     assert phases_by_req["r1"] == {"decode"}
     assert phases_by_req["r2"] == {"prefill"}
 
-    print(f"  ✓ r0 (prefill chunk 0): {len(r0_recs)} records, phase=prefill")
+    print(f"  ✓ r0 (prefill chunk 0): {len(r0_recs)} records (5 tokens × 2 layers), phase=prefill")
     print(f"  ✓ r1 (decode): token_idx=25, decode_token_idx=5")
-    print(f"  ✓ r2 (prefill chunk 1): positions 5-9, phase=prefill")
+    print(f"  ✓ r2 (prefill chunk 1): positions 5-9, phase=prefill, {len(r2_recs)} records")
     print(f"  ✓ All 3 requests correctly classified")
     print()
 
