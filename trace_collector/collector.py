@@ -65,17 +65,25 @@ class ExpertTraceCollector:
     def __init__(
         self,
         output_dir: str,
-        all_moe_layers: list[str],
+        all_moe_layers: list[str] | None = None,
         buffer_size: int = 100_000,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build layer_idx → layer_name mapping.
-        self._layer_names = list(all_moe_layers)
-        self._layer_idx_map: dict[str, int] = {
-            name: idx for idx, name in enumerate(all_moe_layers)
-        }
+        # Layer→index mapping built lazily at trace time.
+        # If ``all_moe_layers`` is provided (e.g. from compilation_config),
+        # we pre-populate for consistent ordering.  Otherwise layers are
+        # auto-registered on first sight by the callback — this handles the
+        # case where ``static_all_moe_layers`` is empty at init time because
+        # the model hasn't been loaded yet.
+        self._layer_names: list[str] = (
+            list(all_moe_layers) if all_moe_layers else []
+        )
+        self._layer_idx_map: dict[str, int] = {}
+        if all_moe_layers:
+            for idx, name in enumerate(all_moe_layers):
+                self._layer_idx_map[name] = idx
 
         # In-memory buffer for trace records.
         self._buffer: list[dict] = []
@@ -163,23 +171,26 @@ class ExpertTraceCollector:
         where ``topk_ids`` is a ``[num_tokens, top_k]`` int tensor of
         selected expert IDs.
 
-        The callback captures the *trace_context* by reference — the same
-        context must not be shared across steps.
+        Layers not seen before are auto-registered with the next available
+        index — this handles the case where ``static_all_moe_layers`` was
+        empty at ``__init__`` time (model not yet loaded).
         """
         collector = self  # capture for use inside the callback closure
-        layer_idx_map = self._layer_idx_map
         buffer = self._buffer
         buffer_size = self._buffer_size
 
         def _record_experts(layer_name: str, topk_ids: torch.Tensor) -> None:
             """Record expert selections for one MoE layer."""
-            layer_idx = layer_idx_map.get(layer_name)
+            # Lazy layer registration: if we haven't seen this layer before,
+            # assign it the next available index.
+            layer_idx = collector._layer_idx_map.get(layer_name)
             if layer_idx is None:
-                logger.warning(
-                    "Unknown MoE layer '%s' — skipping trace for this layer",
-                    layer_name,
+                layer_idx = len(collector._layer_names)
+                collector._layer_names.append(layer_name)
+                collector._layer_idx_map[layer_name] = layer_idx
+                logger.info(
+                    "Auto-registered MoE layer %d: '%s'", layer_idx, layer_name
                 )
-                return
 
             # Move to CPU as numpy — we are inside the forward pass so
             # synchronisation is unavoidable but acceptable for an

@@ -914,24 +914,19 @@ class GPUModelRunner(
             from trace_collector import ExpertTraceCollector
 
             # all_moe_layers is populated during model loading by
-            # register_layer_for_moe_forward_op(); read it from the config.
+            # register_layer_for_moe_forward_op().  At __init__ time it
+            # may still be empty — the collector auto-registers layers
+            # lazily as the callback encounters them.
             all_moe_layers = (
                 self.compilation_config.static_all_moe_layers
             )
-            if not all_moe_layers:
-                logger.warning(
-                    "VLLM_EXPERT_TRACE_DIR is set but no MoE layers were "
-                    "registered — traces will be empty.  This may indicate a "
-                    "non-MoE model or that the model has not been loaded yet."
-                )
             self._expert_trace_collector = ExpertTraceCollector(
                 output_dir=trace_dir,
-                all_moe_layers=all_moe_layers,
+                all_moe_layers=all_moe_layers or None,
             )
             logger.info(
-                "Expert trace collection enabled, output: %s (%d MoE layers)",
+                "Expert trace collection enabled, output: %s",
                 trace_dir,
-                len(all_moe_layers),
             )
 
     def update_max_model_len(self, max_model_len: int) -> None:
