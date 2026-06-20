@@ -78,4 +78,18 @@ class FusedMoERouter(ABC):
                 topk_ids.to(torch.int16)
             )
 
+        # Expert trace hook — fires after expert selection so we record
+        # the final expert assignment (including any EPLB remapping).
+        # Import is lazy to avoid circular dependency at module load time.
+        from vllm.forward_context import get_forward_context, is_forward_context_available
+
+        if is_forward_context_available():
+            ctx = get_forward_context()
+            if (
+                ctx.expert_trace_callback is not None
+                and ctx.all_moe_layers is not None
+            ):
+                layer_name = ctx.all_moe_layers[ctx.moe_layer_index]
+                ctx.expert_trace_callback(layer_name, topk_ids)
+
         return topk_weights, topk_ids

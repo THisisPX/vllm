@@ -1,0 +1,8 @@
+{"request_id": "0", "phase": "prefill", "token_idx": 0, "token_id": 128000, "decode_token_idx": -1, "layer_idx": 0, "experts": [12, 45], "step": 1, "timestamp": 1712345600.100}
+{"request_id": "0", "phase": "prefill", "token_idx": 0, "token_id": 128000, "decode_token_idx": -1, "layer_idx": 1, "experts": [3, 28, 55], "step": 1, "timestamp": 1712345600.101}
+{"request_id": "0", "phase": "prefill", "token_idx": 1, "token_id": 456, "decode_token_idx": -1, "layer_idx": 0, "experts": [7, 33], "step": 1, "timestamp": 1712345600.102}
+{"request_id": "0", "phase": "prefill", "token_idx": 1, "token_id": 456, "decode_token_idx": -1, "layer_idx": 1, "experts": [15, 42, 60], "step": 1, "timestamp": 1712345600.103}
+{"request_id": "0", "phase": "decode", "token_idx": 500, "token_id": 789, "decode_token_idx": 0, "layer_idx": 0, "experts": [8, 31], "step": 50, "timestamp": 1712345605.200}
+{"request_id": "0", "phase": "decode", "token_idx": 500, "token_id": 789, "decode_token_idx": 0, "layer_idx": 1, "experts": [2, 19, 51], "step": 50, "timestamp": 1712345605.201}
+{"request_id": "0", "phase": "decode", "token_idx": 501, "token_id": 1024, "decode_token_idx": 1, "layer_idx": 0, "experts": [8, 31], "step": 51, "timestamp": 1712345605.300}
+{"request_id": "0", "phase": "decode", "token_idx": 501, "token_id": 1024, "decode_token_idx": 1, "layer_idx": 1, "experts": [2, 20, 53], "step": 51, "timestamp": 1712345605.301}

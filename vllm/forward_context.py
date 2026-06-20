@@ -177,6 +177,10 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # Expert trace callback (optional) — invoked by FusedMoERouter after
+    # expert selection.  Signature: (layer_name: str, topk_ids: Tensor) -> None.
+    expert_trace_callback: "Callable[[str, torch.Tensor], None] | None" = None
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -211,8 +215,12 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    expert_trace_callback: "Callable[[str, torch.Tensor], None] | None" = None,
 ):
-    if vllm_config.compilation_config.fast_moe_cold_start:
+    if (
+        vllm_config.compilation_config.fast_moe_cold_start
+        or expert_trace_callback is not None
+    ):
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
     else:
         all_moe_layers = None
@@ -228,6 +236,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        expert_trace_callback=expert_trace_callback,
     )
 
 
@@ -257,6 +266,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    expert_trace_callback: "Callable[[str, torch.Tensor], None] | None" = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -316,6 +326,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        expert_trace_callback=expert_trace_callback,
     )
 
     try:

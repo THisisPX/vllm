@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -906,12 +907,49 @@ class GPUModelRunner(
             )
         self.layerwise_nvtx_hooks_registered = False
 
+        # Expert trace collector — enabled via VLLM_EXPERT_TRACE_DIR env var.
+        self._expert_trace_collector: "ExpertTraceCollector | None" = None
+        trace_dir = os.environ.get("VLLM_EXPERT_TRACE_DIR", "")
+        if trace_dir:
+            from trace_collector import ExpertTraceCollector
+
+            # all_moe_layers is populated during model loading by
+            # register_layer_for_moe_forward_op(); read it from the config.
+            all_moe_layers = (
+                self.compilation_config.static_all_moe_layers
+            )
+            if not all_moe_layers:
+                logger.warning(
+                    "VLLM_EXPERT_TRACE_DIR is set but no MoE layers were "
+                    "registered — traces will be empty.  This may indicate a "
+                    "non-MoE model or that the model has not been loaded yet."
+                )
+            self._expert_trace_collector = ExpertTraceCollector(
+                output_dir=trace_dir,
+                all_moe_layers=all_moe_layers,
+            )
+            logger.info(
+                "Expert trace collection enabled, output: %s (%d MoE layers)",
+                trace_dir,
+                len(all_moe_layers),
+            )
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
             draft_config = self.speculative_config.draft_model_config
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
+
+    def _flush_expert_traces(self) -> None:
+        """Periodically flush buffered expert traces to disk.
+
+        Called at the end of every :meth:`execute_model` step (including
+        early-return paths).  The collector implements its own buffering,
+        so this is a lightweight operation.
+        """
+        if self._expert_trace_collector is not None:
+            self._expert_trace_collector.flush()
 
     def reset_mm_cache(self) -> None:
         """
@@ -4299,6 +4337,59 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+
+        # --- Build expert trace context (if collector is active) ---
+        expert_trace_callback_ref = None
+        if self._expert_trace_collector is not None:
+            num_reqs_trace = self.input_batch.num_reqs
+            num_sched = scheduler_output.num_scheduled_tokens
+            num_computed_cpu = self.input_batch.num_computed_tokens_cpu
+
+            # Build per-token metadata arrays.
+            req_indices_list: list[int] = []
+            token_indices_list: list[int] = []
+            token_ids_list: list[int] = []
+            is_prefill_list: list[bool] = []
+
+            for req_idx in range(num_reqs_trace):
+                req_id = self.input_batch.req_ids[req_idx]
+                n_computed = int(num_computed_cpu[req_idx])
+                n_tokens = int(num_sched[req_idx])
+                prompt_len = len(
+                    self.requests[req_id].prompt_token_ids or []
+                )
+                is_pref = n_computed < prompt_len
+
+                for pos in range(n_tokens):
+                    req_indices_list.append(req_idx)
+                    token_indices_list.append(n_computed + pos)
+                    is_prefill_list.append(is_pref)
+                    # Vocabulary token id; -1 if out of bounds
+                    col = n_computed + pos
+                    if col < self.input_batch.token_ids_cpu.shape[1]:
+                        token_ids_list.append(
+                            int(self.input_batch.token_ids_cpu[req_idx, col])
+                        )
+                    else:
+                        token_ids_list.append(-1)
+
+            prompt_lengths_map = {
+                req_id: len(self.requests[req_id].prompt_token_ids or [])
+                for req_id in self.input_batch.req_ids
+            }
+
+            trace_context = self._expert_trace_collector.build_trace_context(
+                request_ids=list(self.input_batch.req_ids),
+                req_indices=np.array(req_indices_list, dtype=np.int32),
+                is_prefill_tokens=np.array(is_prefill_list, dtype=bool),
+                token_indices=np.array(token_indices_list, dtype=np.int32),
+                token_ids=np.array(token_ids_list, dtype=np.int32),
+                prompt_lengths=prompt_lengths_map,
+            )
+            expert_trace_callback_ref = (
+                self._expert_trace_collector.make_step_callback(trace_context)
+            )
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -4310,6 +4401,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                expert_trace_callback=expert_trace_callback_ref,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -4340,10 +4432,12 @@ class GPUModelRunner(
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     self.kv_connector_output = kv_connector_output
+                    self._flush_expert_traces()
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
+                    self._flush_expert_traces()
                     return self._pool(
                         hidden_states,
                         num_scheduled_tokens,
@@ -4402,6 +4496,7 @@ class GPUModelRunner(
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
 
+        self._flush_expert_traces()
         return None
 
     def _input_fits_in_drafter(
@@ -6352,6 +6447,8 @@ class GPUModelRunner(
             BreakableCUDAGraphWrapper.clear_all_graphs()
             self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
+        if self._expert_trace_collector is not None:
+            self._expert_trace_collector.close()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
 
