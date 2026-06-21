@@ -67,10 +67,9 @@ def plot_hit_rate_evolution(
         return
 
     # Pad to max length.
-    max_len = max(
-        max((len(v) for v in coupled_vecs), default=0),
-        max((len(v) for v in pd_vecs), default=0),
-    )
+    max_c = max((len(v) for v in coupled_vecs)) if coupled_vecs else 0
+    max_pd = max((len(v) for v in pd_vecs)) if pd_vecs else 0
+    max_len = max(max_c, max_pd)
 
     def _pad_mean_std(vecs: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
         mat = np.full((len(vecs), max_len), np.nan)
@@ -177,9 +176,11 @@ def plot_layer_heatmap(results: dict[str, Any], output_dir: Path) -> None:
 
     # Build a delta matrix: layers × min_decode_tokens.
     all_layers = sorted(set(coupled_layers.keys()) | set(pd_layers.keys()))
+    coupled_lens = [len(coupled_layers.get(l, [])) for l in all_layers]
+    pd_lens = [len(pd_layers.get(l, [])) for l in all_layers]
     min_len = min(
-        min((len(coupled_layers.get(l, [])), default=0) for l in all_layers),
-        min((len(pd_layers.get(l, [])), default=0) for l in all_layers),
+        min(coupled_lens) if coupled_lens else 0,
+        min(pd_lens) if pd_lens else 0,
     )
     if min_len > 256:
         min_len = 256  # cap for readability
