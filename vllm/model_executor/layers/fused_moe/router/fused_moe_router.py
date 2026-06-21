@@ -90,6 +90,7 @@ class FusedMoERouter(ABC):
                 and ctx.all_moe_layers is not None
             ):
                 layer_name = ctx.all_moe_layers[ctx.moe_layer_index]
+                ctx.moe_layer_index += 1
                 ctx.expert_trace_callback(layer_name, topk_ids)
 
         return topk_weights, topk_ids
