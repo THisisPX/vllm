@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -255,6 +256,78 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
+
+        # Expert trace collector — enabled via VLLM_EXPERT_TRACE_DIR env var.
+        self._expert_trace_collector: "ExpertTraceCollector | None" = None
+        trace_dir = os.environ.get("VLLM_EXPERT_TRACE_DIR", "")
+        if trace_dir:
+            from trace_collector import ExpertTraceCollector
+
+            self._expert_trace_collector = ExpertTraceCollector(
+                output_dir=trace_dir,
+                all_moe_layers=None,  # lazy registration during forward
+            )
+            logger.info(
+                "Expert trace collection enabled (V2 runner), output: %s", trace_dir
+            )
+
+    def _flush_expert_traces(self) -> None:
+        """Periodically flush buffered expert traces to disk."""
+        if self._expert_trace_collector is not None:
+            self._expert_trace_collector.flush()
+
+    def _build_trace_context(
+        self, input_batch: "InputBatch"
+    ) -> "Callable[[str, torch.Tensor], None] | None":
+        """Build per-step TraceContext from input_batch data."""
+        if self._expert_trace_collector is None:
+            return None
+
+        num_reqs = input_batch.num_reqs
+        req_ids = list(input_batch.req_ids)
+        num_sched = input_batch.num_scheduled_tokens
+        num_computed = input_batch.num_computed_tokens_np
+        is_prefilling = input_batch.is_prefilling_np
+        prefill_lens = input_batch.prefill_len_np
+
+        # Build per-token arrays.
+        num_tokens = int(num_sched.sum())
+        req_indices_list = np.empty(num_tokens, dtype=np.int32)
+        token_indices_list = np.empty(num_tokens, dtype=np.int32)
+        is_prefill_list = np.empty(num_tokens, dtype=bool)
+        token_ids_list = np.empty(num_tokens, dtype=np.int32)
+
+        # Per-request data off the InputBatch.
+        positions = input_batch.positions.cpu().numpy()
+        input_ids_cpu = input_batch.input_ids.cpu().numpy()
+
+        offset = 0
+        for req_idx in range(num_reqs):
+            n_tokens = int(num_sched[req_idx])
+            n_comp = int(num_computed[req_idx])
+            is_pref = bool(is_prefilling[req_idx])
+            req_indices_list[offset : offset + n_tokens] = req_idx
+            is_prefill_list[offset : offset + n_tokens] = is_pref
+            for pos in range(n_tokens):
+                token_indices_list[offset + pos] = n_comp + pos
+                token_ids_list[offset + pos] = int(
+                    input_ids_cpu[offset + pos]
+                )
+            offset += n_tokens
+
+        prompt_lengths = {
+            req_ids[i]: int(prefill_lens[i]) for i in range(num_reqs)
+        }
+
+        trace_context = self._expert_trace_collector.build_trace_context(
+            request_ids=req_ids,
+            req_indices=req_indices_list,
+            is_prefill_tokens=is_prefill_list,
+            token_indices=token_indices_list,
+            token_ids=token_ids_list,
+            prompt_lengths=prompt_lengths,
+        )
+        return self._expert_trace_collector.make_step_callback(trace_context)
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -1118,6 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
+                self._flush_expert_traces()
                 return empty_output
 
         # Get batch descriptor and sync across DP ranks.
@@ -1154,6 +1228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
+            self._flush_expert_traces()
             return empty_output
 
         if not dummy_run:
@@ -1161,6 +1236,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+
+            # --- Build expert trace context (if collector is active) ---
+            expert_trace_callback_ = self._build_trace_context(input_batch)
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1172,6 +1250,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
+            expert_trace_callback_ = None
             input_batch = InputBatch.make_dummy(
                 batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
@@ -1278,6 +1357,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
+                expert_trace_callback=expert_trace_callback_,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
@@ -1319,7 +1399,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
+            self._flush_expert_traces()
             return output_intermediate_tensors
+        self._flush_expert_traces()
         return None
 
     @torch.inference_mode()
@@ -1532,6 +1614,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model"):
             del self.model
+        if self._expert_trace_collector is not None:
+            self._expert_trace_collector.close()
 
         gc.collect()
         torch.accelerator.empty_cache()
