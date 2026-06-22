@@ -26,10 +26,13 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import os
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path as _StdPath
 
+import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
@@ -216,12 +219,18 @@ class EplbState:
         self,
         parallel_config: ParallelConfig,
         device: torch.device,
-        trace_callback: "Callable[[int, torch.Tensor], None] | None" = None,
     ):
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self._trace_callback = trace_callback
+
+        # EPLB trace: activated by VLLM_EPLB_TRACE_DIR env var.
+        _td = os.environ.get("VLLM_EPLB_TRACE_DIR", "")
+        self._eplb_trace: _EplbTraceCollector | None = (
+            _EplbTraceCollector(_td) if _td else None
+        )
+        if self._eplb_trace is not None:
+            logger.info("EPLB trace enabled → %s", _td)
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -614,14 +623,14 @@ class EplbState:
 
         self._update_layer_should_record(log_stats=log_stats)
 
-        # EPLB trace hook: record physical_to_logical_map after each
-        # step so we can measure arrangement convergence over time.
-        if self._trace_callback is not None:
-            for eplb_model_state in self.model_states.values():
-                self._trace_callback(
+        # EPLB trace: record PTL map every step (skip dummy/profile).
+        if self._eplb_trace is not None and not is_dummy:
+            for ms in self.model_states.values():
+                self._eplb_trace.record(
                     self.expert_rearrangement_step,
-                    eplb_model_state.physical_to_logical_map,
+                    ms.physical_to_logical_map,
                 )
+            self._eplb_trace.flush()
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -907,12 +916,10 @@ class EplbState:
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
-        trace_callback: "Callable[[int, torch.Tensor], None] | None" = None,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
             device=device,
-            trace_callback=trace_callback,
         )
         eplb_state.add_model(
             model=model,
@@ -1198,3 +1205,52 @@ def _move_to_workspace(
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None
     result.consumed_event.record()
+
+
+# ---------------------------------------------------------------------------
+# Self-contained EPLB trace collector (activated by env var)
+# ---------------------------------------------------------------------------
+
+
+class _EplbTraceCollector:
+    """Records PTL map snapshots; flushes to ``snapshots.npz`` each step."""
+
+    def __init__(self, output_dir: str) -> None:
+        self.output_dir = _StdPath(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._snapshots: dict[int, np.ndarray] = {}
+        self._closed = False
+
+    def record(self, step: int, ptl_map: torch.Tensor) -> None:
+        if self._closed:
+            return
+        self._snapshots[step] = ptl_map.cpu().to(torch.int32).numpy().copy()
+
+    def flush(self) -> None:
+        if self._closed:
+            return
+        self._write()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._write()
+
+    def _write(self) -> None:
+        if not self._snapshots:
+            return
+        import json as _json
+
+        npz = self.output_dir / "snapshots.npz"
+        np.savez_compressed(npz, **{f"s{s}": m for s, m in self._snapshots.items()})
+        first = next(iter(self._snapshots.values()))
+        meta = {
+            "num_layers": int(first.shape[0]),
+            "num_physicals": int(first.shape[1]),
+            "num_snapshots": len(self._snapshots),
+            "steps": sorted(self._snapshots.keys()),
+        }
+        (self.output_dir / "metadata.json").write_text(
+            _json.dumps(meta, indent=2)
+        )

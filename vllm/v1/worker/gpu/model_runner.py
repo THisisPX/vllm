@@ -1616,6 +1616,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del self.model
         if self._expert_trace_collector is not None:
             self._expert_trace_collector.close()
+        if hasattr(self, "eplb"):
+            self.eplb.shutdown_trace()
 
         gc.collect()
         torch.accelerator.empty_cache()

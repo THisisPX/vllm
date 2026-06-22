@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from functools import wraps
-from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -58,23 +55,11 @@ class EPLBController:
         self.suppressed = False
         self._has_registered_models = False
 
-        # EPLB trace collector — enabled via VLLM_EPLB_TRACE_DIR env var.
-        self._eplb_trace: "_EplbTraceCollector | None" = None
-        _eplb_trace_dir = os.environ.get("VLLM_EPLB_TRACE_DIR", "")
-        if _eplb_trace_dir:
-            self._eplb_trace = _EplbTraceCollector(_eplb_trace_dir)
-            logger.info(
-                "EPLB trace collection enabled, output: %s", _eplb_trace_dir
-            )
-
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            cb = self._eplb_trace.record_map if self._eplb_trace else None
-            self.state = EplbState(
-                self.parallel_config, self.device, trace_callback=cb
-            )
+            self.state = EplbState(self.parallel_config, self.device)
 
     def maybe_register_speculator(
         self,
@@ -160,7 +145,6 @@ class EPLBController:
         model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
 
-        cb = self._eplb_trace.record_map if self._eplb_trace else None
         self.state = EplbState.from_mapping(
             model=model,
             model_config=model_config,
@@ -168,57 +152,5 @@ class EPLBController:
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
-            trace_callback=cb,
         )
         self._has_registered_models = True
-
-
-# ---------------------------------------------------------------------------
-# Inline EPLB trace collector (avoids cross-package imports in workers)
-# ---------------------------------------------------------------------------
-
-
-class _EplbTraceCollector:
-    """Minimal collector for physical_to_logical_map snapshots.
-
-    Inlined here to avoid import issues with the ``analysis`` package
-    in multiprocessing workers.  Saves to ``snapshots.npz`` on close.
-    """
-
-    def __init__(self, output_dir: str) -> None:
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._snapshots: dict[int, np.ndarray] = {}
-        self._closed = False
-
-    def record_map(self, step: int, ptl_map: torch.Tensor) -> None:
-        if self._closed:
-            return
-        self._snapshots[step] = ptl_map.cpu().to(torch.int32).numpy().copy()
-
-    def close(self) -> None:
-        if self._closed or not self._snapshots:
-            return
-        self._closed = True
-
-        import json
-
-        npz_path = self.output_dir / "snapshots.npz"
-        np.savez_compressed(
-            npz_path,
-            **{f"step_{s}": m for s, m in self._snapshots.items()},
-        )
-        logger.info(
-            "EPLB snapshots: %d steps → %s (%.1f KB)",
-            len(self._snapshots), npz_path, npz_path.stat().st_size / 1024,
-        )
-
-        first = next(iter(self._snapshots.values()))
-        meta = {
-            "num_layers": int(first.shape[0]),
-            "num_physicals": int(first.shape[1]),
-            "num_snapshots": len(self._snapshots),
-            "steps": sorted(self._snapshots.keys()),
-        }
-        meta_path = self.output_dir / "metadata.json"
-        meta_path.write_text(json.dumps(meta, indent=2))
