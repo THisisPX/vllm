@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -55,11 +56,24 @@ class EPLBController:
         self.suppressed = False
         self._has_registered_models = False
 
+        # EPLB trace collector — enabled via VLLM_EPLB_TRACE_DIR env var.
+        self._eplb_trace: "EplbTraceCollector | None" = None  # noqa: F821
+        _eplb_trace_dir = os.environ.get("VLLM_EPLB_TRACE_DIR", "")
+        if _eplb_trace_dir:
+            from analysis.eplb_trace_collector import EplbTraceCollector
+            self._eplb_trace = EplbTraceCollector(_eplb_trace_dir)
+            logger.info(
+                "EPLB trace collection enabled, output: %s", _eplb_trace_dir
+            )
+
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = EplbState(self.parallel_config, self.device)
+            cb = self._eplb_trace.record_map if self._eplb_trace else None
+            self.state = EplbState(
+                self.parallel_config, self.device, trace_callback=cb
+            )
 
     def maybe_register_speculator(
         self,
@@ -145,6 +159,7 @@ class EPLBController:
         model = _unwrap_moe(model)
         assert is_mixture_of_experts(model)
 
+        cb = self._eplb_trace.record_map if self._eplb_trace else None
         self.state = EplbState.from_mapping(
             model=model,
             model_config=model_config,
@@ -152,5 +167,6 @@ class EPLBController:
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
+            trace_callback=cb,
         )
         self._has_registered_models = True

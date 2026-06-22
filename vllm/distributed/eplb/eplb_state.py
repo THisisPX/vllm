@@ -212,10 +212,16 @@ class EplbState:
     EplbState of each expert parallel model. Key is the model config hash.
     """
 
-    def __init__(self, parallel_config: ParallelConfig, device: torch.device):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        device: torch.device,
+        trace_callback: "Callable[[int, torch.Tensor], None] | None" = None,
+    ):
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self._trace_callback = trace_callback
         self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected EPLB algorithm class
@@ -608,6 +614,15 @@ class EplbState:
 
         self._update_layer_should_record(log_stats=log_stats)
 
+        # EPLB trace hook: record physical_to_logical_map after each
+        # step so we can measure arrangement convergence over time.
+        if self._trace_callback is not None:
+            for eplb_model_state in self.model_states.values():
+                self._trace_callback(
+                    self.expert_rearrangement_step,
+                    eplb_model_state.physical_to_logical_map,
+                )
+
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
 
@@ -892,10 +907,12 @@ class EplbState:
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
+        trace_callback: "Callable[[int, torch.Tensor], None] | None" = None,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
             device=device,
+            trace_callback=trace_callback,
         )
         eplb_state.add_model(
             model=model,
