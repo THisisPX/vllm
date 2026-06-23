@@ -262,7 +262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         trace_dir = os.environ.get("VLLM_EXPERT_TRACE_DIR", "")
         if trace_dir:
             try:
-                from trace_collector import ExpertTraceCollector
+                from vllm._trace_collector import ExpertTraceCollector
             except ModuleNotFoundError:
                 # trace_collector may not be on the worker's sys.path.
                 # Add the vLLM source root and retry.
@@ -272,7 +272,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 if _src_root not in _sys.path:
                     _sys.path.insert(0, _src_root)
-                from trace_collector import ExpertTraceCollector  # noqa: F811
+                from vllm._trace_collector import ExpertTraceCollector  # noqa: F811
 
             self._expert_trace_collector = ExpertTraceCollector(
                 output_dir=trace_dir,
