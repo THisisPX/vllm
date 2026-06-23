@@ -911,14 +911,7 @@ class GPUModelRunner(
         self._expert_trace_collector: "ExpertTraceCollector | None" = None
         trace_dir = os.environ.get("VLLM_EXPERT_TRACE_DIR", "")
         if trace_dir:
-            try:
-                from vllm._trace_collector import ExpertTraceCollector
-            except ModuleNotFoundError:
-                import sys as _sys
-                _src = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-                if _src not in _sys.path:
-                    _sys.path.insert(0, _src)
-                from vllm._trace_collector import ExpertTraceCollector  # noqa: F811
+            from vllm._trace_collector import ExpertTraceCollector
 
             # all_moe_layers is populated during model loading by
             # register_layer_for_moe_forward_op().  At __init__ time it

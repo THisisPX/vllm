@@ -23,8 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-from trace_collector.collector import ExpertTraceCollector
-from trace_collector.context import TraceContext
+from vllm._trace_collector.collector import ExpertTraceCollector
+from vllm._trace_collector.context import TraceContext
 
 
 # ---------------------------------------------------------------------------
