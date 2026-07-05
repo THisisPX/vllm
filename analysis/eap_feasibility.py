@@ -75,12 +75,11 @@ def load_grouped(path: str) -> dict[str, list[dict]]:
 
 def _counts_to_probs(counter: Counter, n_experts: int) -> np.ndarray:
     """Convert counter to probability distribution (smoothed)."""
-    probs = np.zeros(n_experts, dtype=np.float64)
+    probs = np.full(n_experts, 1.0, dtype=np.float64)  # Laplace smoothing
     total = sum(counter.values())
     if total == 0:
-        probs.fill(1.0 / n_experts)
+        probs /= probs.sum()
         return probs
-    # Add Laplace smoothing (pseudocount = 1) to avoid log(0)
     for e, c in counter.items():
         probs[e] = c + 1.0
     probs /= probs.sum()
