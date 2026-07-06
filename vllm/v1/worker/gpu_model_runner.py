@@ -4349,7 +4349,7 @@ class GPUModelRunner(
             for req_idx in range(num_reqs_trace):
                 req_id = self.input_batch.req_ids[req_idx]
                 n_computed = int(num_computed_cpu[req_idx])
-                n_tokens = int(num_sched[req_idx])
+                n_tokens = int(num_sched.get(req_id, 0))
                 prompt_len = len(
                     self.requests[req_id].prompt_token_ids or []
                 )
